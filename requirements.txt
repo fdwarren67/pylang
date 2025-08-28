@@ -1,0 +1,6 @@
+langgraph
+langchain
+langchain-openai
+langchain-tavily
+python-dotenv
+shapely
