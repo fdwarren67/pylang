@@ -1,10 +1,7 @@
 from dotenv import load_dotenv
-
-from calcs import resolve_edge
 load_dotenv()
 
-import json
-from typing import Optional
+from typing import Optional, Tuple
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from langchain_core.prompts import ChatPromptTemplate
@@ -13,116 +10,68 @@ from langchain_openai import ChatOpenAI
 from uuid import UUID
 
 from pydantic import BaseModel
-from domain.intent import CreateLateralIntent, Point
 from domain.block import Block
 from domain.lateral import Lateral
-
-schemas = {
-    "Block": Block.model_json_schema(),
-    "Lateral": Lateral.model_json_schema()
-}
-
-schema_text = "\n\n".join(
-    [f"### {name} Schema\n{schema}" for name, schema in schemas.items()]
-)
-
-
-parser = PydanticOutputParser(pydantic_object=CreateLateralIntent)
-
-prompt = ChatPromptTemplate.from_template(
-    """
-    You are an assistant that converts user requests into block references.
-
-    Schema:
-    {format_instructions}
-
-    - Normalize edge references to one of: 
-      north, northeast, east, southeast, south, southwest, west, northwest.
-    - Always set relation = "edge".
-
-    User input: {user_input}
-    """
-)
-
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-translator_chain = prompt | llm | parser
-    
-def identify_edge_node(state: dict):
-    # Step 1. Normalize user input → BlockReference
-    ref = translator_chain.invoke({
-        "user_input": state.user_input,
-        "format_instructions": parser.get_format_instructions()
-    })
-    
-    # Step 2. Resolve actual edge geometry
-    edge_geom = resolve_edge(state.block_context, ref.azimuth)
-    
-    # Pick a reference point (e.g., midpoint of the edge)
-    from shapely.geometry import shape
-    edge_line = shape(edge_geom)
-    midpoint = edge_line.interpolate(0.5, normalized=True)
-    
-    return {
-        "reference": ref,
-        "edge": edge_geom,
-        "edge_midpoint": (midpoint.x, midpoint.y)
-    }
-
-def create_lateral_intent_node(state: dict):
-    # Build intent using the reference point found by edge detector
-    intent = CreateLateralIntent(
-        # block_guid=state["block_guid"],
-        points=[
-            Point(coordinates=state.edge_midpoint, point_type="reference")
-        ],
-        azimuth=state.get("azimuth"),
-        length=state.get("length")
-    )
-    return {"lateral_intent": intent}
-
+from identify_edge import IdentifyEdgeTool
 
 class State(BaseModel):
     user_input: str
-    block_context: str
-    intent: Optional[CreateLateralIntent] = None
-
+    block_context: dict
+    block_guid: Optional[UUID] = None
+    azimuth: Optional[float] = None
+    length: Optional[float] = None
+    reference: Optional[dict] = None
+    edge: Optional[dict] = None
+    edge_midpoint: Optional[Tuple[float, float]] = None
+    # intent: Optional[CreateLateralIntent] = None
 
 graph = StateGraph(State)
-graph.add_node("identify_edge", identify_edge_node)
-# graph.add_node("create_lateral_intent", create_lateral_intent_node)
 
+def identify_edge_node(state: State):
+    output = IdentifyEdgeTool.invoke({
+        "user_input": state.user_input,
+        "block_geometry": state.block_context["geometry"]
+    })
+    return {
+        "reference": output["reference"],
+        "edge": output["edge"],
+        "edge_midpoint": output["edge_midpoint"]
+    }
+
+
+graph.add_node("identify_edge", identify_edge_node)
 graph.set_entry_point("identify_edge")
-# graph.add_edge("identify_edge", "create_lateral_intent")
 graph.add_edge("identify_edge", END)
 
-# graph.add_edge("create_lateral_intent", END)
-
 app = graph.compile()
+
 
 def main():
     block = Block(
         # block_guid="550e8400-e29b-41d4-a716-446655440000",
         name="North Unit 12",
-        geometry={"type": "Polygon", "coordinates": [[[
-          1303855.8553287212,
-          496081.36024564353
+        geometry={"type": "Polygon", "coordinates": [[
+            [
+          1302884.0727000097,
+          495868.2017720627
         ],
         [
-          1302546.52437828,
-          501372.4894525196
+          1302477.476373858,
+          501620.4734356067
         ],
         [
-          1305950.7211166995,
-          502214.8843320876
+          1306295.3290577002,
+          501890.3363638263
         ],
         [
-          1307260.0520671408,
-          496923.7551252115
+          1306701.9253838519,
+          496138.06470028235
         ],
         [
-          1303855.8553287212,
-          496081.36024564353
-        ]]]},
+          1302884.0727000097,
+          495868.2017720627
+        ]
+        ]]},
         azimuth=166.101,
         epsg_code=32039,
         epsg_name="NAD27 / Texas Central",
@@ -131,11 +80,20 @@ def main():
     )
 
     result = app.invoke({
-        "user_input": "Draw a lateral along the northern boundary.",
-        "block_context": block.model_dump_json()
+        "user_input": "Create three wellbores just north of the lower left lease line.",
+        "block_context": block.model_dump(),
+        "block_guid": UUID("550e8400-e29b-41d4-a716-446655440000"),
+        # "azimuth": block.azimuth,
+        # "length": 3000
     })
 
-    print(result["intent"].model_dump_json(indent=2))
+    print("\n-----------------")
+    print(result["user_input"])
+    print(result["reference"])
+    
+    lst = [list(x) for x in result["edge"]["coordinates"]]
+
+    print(lst)
 
 
 if __name__ == "__main__":
